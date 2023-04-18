@@ -51,7 +51,7 @@ int main(int argc, char *argv[])
     printf("\n");
 
     // Initiate hash table
-    struct ht *ht = ht_create(BUCKET_NUM, BUCKET_SIZE, NULL, NULL);
+    struct ht *ht = ht_create(BUCKET_NUM, ELEMENT_NUM, NULL, NULL);
     if (!ht)
     {
         fprintf(stderr, "ht_create failed\n");
@@ -160,7 +160,7 @@ int main(int argc, char *argv[])
         // Validate the returned information
         if (msg.code == SOKT_CODE_PUT)
         {
-            code = ht_put(ht, msg.key, msg.value, NULL, NULL);
+            code = ht_put(ht, msg.key, msg.value, NULL, NULL, NULL);
             assert((buf.code == SOKT_CODE_SUCCESS && code == HT_CODE_SUCCESS) || (buf.code == SOKT_CODE_FULL && code == HT_CODE_FULL));
             assert(buf.key == msg.key);
             assert(buf.value == msg.value);
@@ -174,7 +174,7 @@ int main(int argc, char *argv[])
         }
         else if (msg.code == SOKT_CODE_GET)
         {
-            code = ht_get(ht, msg.key, &msg.value, NULL, NULL);
+            code = ht_get(ht, msg.key, &msg.value, 1);
             assert((buf.code == SOKT_CODE_SUCCESS && code == HT_CODE_SUCCESS) || (buf.code == SOKT_CODE_NOT_FOUND && code == HT_CODE_NOT_FOUND));
             assert(buf.key == msg.key);
 

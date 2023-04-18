@@ -54,10 +54,10 @@ int main(int argc, char *argv[])
     printf("\n");
 
     // Initiate hash table
-    struct ht_element *ht_addr;
+    void *ht_addr;
     size_t ht_size;
 
-    struct ht *ht = ht_create(BUCKET_NUM, BUCKET_SIZE, &ht_addr, &ht_size);
+    struct ht *ht = ht_create(BUCKET_NUM, ELEMENT_NUM, &ht_addr, &ht_size);
     if (!ht)
     {
         fprintf(stderr, "ht_create failed\n");
@@ -96,8 +96,9 @@ int main(int argc, char *argv[])
 
     struct sokt_message msg;
     int ht_status;
-    long ht_element_offset;
-    size_t ht_element_size;
+    char is_update;
+    long ht_element_offset[2];
+    size_t ht_element_size[2];
     enum sokt_message_code code;
 
     while (1)
@@ -116,7 +117,7 @@ int main(int argc, char *argv[])
         code = msg.code;
         if (code == SOKT_CODE_PUT && is_primary)
         {
-            ht_status = ht_put(ht, msg.key, msg.value, &ht_element_offset, &ht_element_size);
+            ht_status = ht_put(ht, msg.key, msg.value, &is_update, ht_element_offset, ht_element_size);
             switch (ht_status)
             {
             case HT_CODE_SUCCESS:
@@ -132,7 +133,7 @@ int main(int argc, char *argv[])
         }
         else if (code == SOKT_CODE_GET)
         {
-            ht_status = ht_get(ht, msg.key, &msg.value, NULL, NULL);
+            ht_status = ht_get(ht, msg.key, &msg.value, is_primary);
             switch (ht_status)
             {
             case HT_CODE_SUCCESS:
@@ -162,9 +163,9 @@ int main(int argc, char *argv[])
         skot_message_show(&msg);
 #endif
 
-        if (code == SOKT_CODE_PUT && is_primary)
+        if (code == SOKT_CODE_PUT && msg.code == SOKT_CODE_SUCCESS && is_primary)
         {
-            if (rdma_wrtie_all(rdma_ctx, ht_element_offset, ht_element_size, others_num) == -1)
+            if (rdma_wrtie_all(rdma_ctx, ht_element_offset[0], ht_element_size[0], others_num) == -1)
             {
                 fprintf(stderr, "rdma_wrtie_all failed\n");
                 goto out6;
@@ -174,6 +175,21 @@ int main(int argc, char *argv[])
             {
                 fprintf(stderr, "rdma_wait_completion_all failed\n");
                 goto out6;
+            }
+
+            if (is_update == 0)
+            {
+                if (rdma_wrtie_all(rdma_ctx, ht_element_offset[1], ht_element_size[1], others_num) == -1)
+                {
+                    fprintf(stderr, "rdma_wrtie_all failed\n");
+                    goto out6;
+                }
+
+                if (rdma_wait_completion_all(rdma_ctx, others_num) == -1)
+                {
+                    fprintf(stderr, "rdma_wait_completion_all failed\n");
+                    goto out6;
+                }
             }
         }
     }

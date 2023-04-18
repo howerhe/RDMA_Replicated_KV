@@ -10,8 +10,8 @@
 // Number of hashtable buckets
 #define BUCKET_NUM 32
 
-// Length of each hashtable bucket
-#define BUCKET_SIZE 50
+// Number of total elemnts in the hashtable
+#define ELEMENT_NUM 1000
 
 // Total number of tests from client
 #define TEST_NUM 1000

@@ -4,30 +4,30 @@
 
 #include "ht.h"
 
-#define PRELOAD_PERCENT 80
-
-struct ht_element
+struct element
 {
-    char is_occupied;
     ht_key_t key;
     ht_value_t value;
+    struct element *next;
+    int next_offset; // For backups, in element not byte for pointer arithmetic
 };
 
 struct ht
 {
     unsigned bucket_num;
-    unsigned bucket_size;
-    size_t capacity;
-    struct ht_element *head;
+    unsigned element_num;
+    unsigned element_num_internal; // element_num + hashtable list dummy heads + free list dummy head
+    struct element *addr;          // start address for the elements
+    struct element *free;          // dummy head for free list, which is placed immediately after bucket dummy heads
 };
 
 unsigned hash(const struct ht *ht, ht_key_t key);
-void *bucket_addr(const struct ht *ht, ht_key_t key);
+// void *bucket_addr(const struct ht *ht, ht_key_t key);
 
-struct ht *ht_create(int bucket_num, int bucket_size, struct ht_element **ht_addr, size_t *ht_size)
+struct ht *ht_create(int bucket_num, int element_num, void **addr, size_t *size)
 {
     assert(0 < bucket_num && bucket_num <= (int)(HT_KEY_MAX - HT_KEY_MIN));
-    assert(0 < bucket_size);
+    assert(0 < element_num);
 
     struct ht *ht = calloc(1, sizeof(struct ht));
     if (!ht)
@@ -37,24 +37,32 @@ struct ht *ht_create(int bucket_num, int bucket_size, struct ht_element **ht_add
     }
 
     ht->bucket_num = bucket_num;
-    ht->bucket_size = bucket_size;
-    ht->capacity = ht->bucket_num * ht->bucket_size;
+    ht->element_num = element_num;
+    ht->element_num_internal = ht->element_num + ht->bucket_num + 1;
 
-    ht->head = calloc(ht->capacity, sizeof(struct ht_element));
-    if (!ht->head)
+    ht->addr = calloc(ht->element_num_internal, sizeof(struct element));
+    if (!ht->addr)
     {
-        perror("calloc for ht->head");
+        perror("calloc for ht->addr");
         free(ht);
         return NULL;
     }
 
-    if (ht_addr)
+    ht->free = ht->addr + ht->bucket_num;
+    struct element *pre = ht->free;
+    for (int i = ht->bucket_num + 1; i < ht->element_num_internal; i++)
     {
-        *ht_addr = ht->head;
+        pre->next = ht->addr + i;
+        pre = pre->next;
     }
-    if (ht_size)
+
+    if (addr)
     {
-        *ht_size = ht->capacity * sizeof(struct ht_element);
+        *addr = ht->addr;
+    }
+    if (size)
+    {
+        *size = ht->element_num_internal * sizeof(struct element);
     }
 
     return ht;
@@ -67,9 +75,9 @@ void ht_destroy(struct ht *ht)
         return;
     }
 
-    if (ht->head)
+    if (ht->addr)
     {
-        free(ht->head);
+        free(ht->addr);
     }
 
     free(ht);
@@ -79,104 +87,170 @@ void ht_show(struct ht *ht)
 {
     assert(ht);
 
+    struct element *e;
+
     for (int i = 0; i < ht->bucket_num; i++)
     {
-        for (int j = 0; j < ht->bucket_size; j++)
+        printf("bucket %d\n", i);
+        e = ht->addr + i;
+
+        int j = 0;
+        while (e)
         {
-            struct ht_element *addr = ht->head + ht->bucket_size * i + j;
-            printf("bucket %d column %d: address %p, is_occupied %d, key %u, value %u\n",
-                   i, j, addr, addr->is_occupied, addr->key, addr->value);
+            printf("\tnode %d\taddr %p\t", j, e);
+            if (j == 0)
+            {
+                printf("dummy head\tnext %p\tnext_offset %d\n", e->next, e->next_offset);
+            }
+            else
+            {
+                printf("key %u\tvalue %u\tnext %p\tnext_offset %d\n", e->key, e->value, e->next, e->next_offset);
+            }
+            e = e->next;
+            j++;
         }
+        printf("\n");
+    }
+
+    e = ht->free;
+    printf("free list\n");
+
+    int j = 0;
+    while (e)
+    {
+        printf("\tnode %d\taddr %p\t", j, e);
+        if (j == 0)
+        {
+            printf("dummy head\n");
+        }
+        else
+        {
+            printf("empty element\n");
+        }
+        e = e->next;
+        j++;
     }
 }
 
 void ht_preload(struct ht *ht)
 {
     assert(ht);
+    /*
+        for (int i = 0; i < ht->capacity; i++)
+        {
+            ht_key_t key = i + HT_KEY_MIN;
+            struct element *addr = bucket_addr(ht, key);
 
-    for (int i = 0; i < ht->capacity; i++)
-    {
-        ht_key_t key = i + HT_KEY_MIN;
-        struct ht_element *addr = bucket_addr(ht, key);
-
-        addr->is_occupied = 1;
-        addr->key = key;
-        addr->value = key;
-    }
+            addr->occupied = 1;
+            addr->key = key;
+            addr->value = key;
+        }*/
 }
 
-enum ht_code ht_put(const struct ht *ht, ht_key_t key, ht_value_t value, long *offset, size_t *update_size)
+enum ht_code ht_put(const struct ht *ht, ht_key_t key, ht_value_t value, char *is_update, long *offsets, size_t *sizes)
 {
     assert(ht);
     assert(HT_KEY_MIN <= key && key <= HT_KEY_MAX);
     assert(HT_VALUE_MIN <= value && value <= HT_VALUE_MAX);
 
-    struct ht_element *addr = bucket_addr(ht, key);
-    if (!addr)
+    struct element *pre = ht->addr + hash(ht, key);
+    struct element *e = pre->next;
+
+    while (e)
     {
-        fprintf(stderr, "bucket_addr failed\n");
-        return HT_CODE_ERROR;
+        if (e->key == key) // Update
+        {
+            e->value = value;
+
+            // update offset and size
+            if (is_update)
+            {
+                *is_update = 1;
+            }
+            if (offsets)
+            {
+                *offsets = (e - ht->addr) * sizeof(struct element);
+            }
+            if (sizes)
+            {
+                *sizes = sizeof(struct element);
+            }
+
+            return HT_CODE_SUCCESS;
+        }
+
+        pre = e;
+        e = e->next;
     }
 
-    for (int i = 0; i < ht->bucket_size; i++)
+    // Put
+    e = ht->free->next;
+    if (!e)
     {
-        if (addr[i].is_occupied)
-        {
-            continue;
-        }
-
-        addr[i].is_occupied = 1;
-        addr[i].key = key;
-        addr[i].value = value;
-
-        if (offset)
-        {
-            *offset = (&(addr[i]) - ht->head) * sizeof(struct ht_element);
-        }
-        if (update_size)
-        {
-            *update_size = sizeof(struct ht_element);
-        }
-        return HT_CODE_SUCCESS;
+        return HT_CODE_FULL;
     }
 
-    return HT_CODE_FULL;
+    ht->free->next = e->next;
+    pre->next = e;
+    pre->next_offset = e - ht->addr;
+    e->next = NULL;
+    e->key = key;
+    e->value = value;
+
+    // update offsets and sizes
+    if (is_update)
+    {
+        *is_update = 0;
+    }
+    if (offsets)
+    {
+        offsets[0] = (e - ht->addr) * sizeof(struct element);
+        offsets[1] = (pre - ht->addr) * sizeof(struct element);
+    }
+    if (sizes)
+    {
+        sizes[0] = sizeof(struct element);
+        sizes[1] = sizeof(struct element);
+    }
+
+    return HT_CODE_SUCCESS;
 }
 
-enum ht_code ht_get(const struct ht *ht, ht_key_t key, ht_value_t *value, long *offset, size_t *update_size)
+enum ht_code ht_del(const struct ht *ht, ht_key_t key, ht_value_t value, long *offset, size_t *size)
+{
+    assert(ht);
+    assert(HT_KEY_MIN <= key && key <= HT_KEY_MAX);
+    assert(0); // unfinished
+
+    return HT_CODE_ERROR;
+}
+
+enum ht_code ht_get(const struct ht *ht, ht_key_t key, ht_value_t *value, char is_primary)
 {
     assert(ht);
     assert(HT_KEY_MIN <= key && key <= HT_KEY_MAX);
     assert(value);
 
-    struct ht_element *addr = bucket_addr(ht, key);
-    if (!addr)
+    struct element *e = ht->addr + hash(ht, key);
+    if (!is_primary && e->next)
     {
-        fprintf(stderr, "bucket_addr failed\n");
-        return HT_CODE_ERROR;
+        e->next = ht->addr + e->next_offset;
     }
+    e = e->next; // To skip the dummy head
 
-    for (int i = 0; i < ht->bucket_size; i++)
+    while (e)
     {
-        if (!addr[i].is_occupied)
+        if (e->key == key)
         {
-            break;
-        }
-        if (addr[i].key != key)
-        {
-            continue;
+            *value = e->value;
+            return HT_CODE_SUCCESS;
         }
 
-        *value = addr[i].value;
-        if (offset)
+        if (!is_primary && e->next)
         {
-            *offset = (&(addr[i]) - ht->head) * sizeof(struct ht_element);
+            e->next = ht->addr + e->next_offset;
         }
-        if (update_size)
-        {
-            *update_size = sizeof(struct ht_element);
-        }
-        return HT_CODE_SUCCESS;
+        e = e->next;
     }
 
     return HT_CODE_NOT_FOUND;
@@ -188,14 +262,4 @@ unsigned hash(const struct ht *ht, ht_key_t key)
     assert(HT_KEY_MIN <= key && key <= HT_KEY_MAX);
 
     return key % ht->bucket_num;
-}
-
-void *bucket_addr(const struct ht *ht, ht_key_t key)
-{
-    assert(ht);
-    assert(HT_KEY_MIN <= key && key <= HT_KEY_MAX);
-
-    unsigned bucket = hash(ht, key);
-
-    return ht->head + bucket * ht->bucket_size;
 }
