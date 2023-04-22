@@ -62,25 +62,6 @@ int main(int argc, char *argv[])
 
     printf("hashtable initiated\n");
 
-    // Setup socket connections with servers
-    int *sockfds = malloc(servers_num * sizeof(int));
-    if (!sockfds)
-    {
-        perror("malloc for sockfds");
-        goto out3;
-    }
-    memset(sockfds, -1, servers_num * sizeof(int));
-
-    for (int i = 0; i < servers_num; i++)
-    {
-        sockfds[i] = sokt_active_open(name_servers[i].addr, name_servers[i].port);
-        if (sockfds[i] == -1)
-        {
-            fprintf(stderr, "sokt_active_open failed\n");
-            goto out4;
-        }
-    }
-
     // Run the key-value store
     printf("\nrunning experiments\n");
 
@@ -133,12 +114,19 @@ int main(int argc, char *argv[])
             server = rand() % servers_num;
         }
 
+        int sockfd = sokt_active_open(name_servers[server].addr, name_servers[server].port);
+        if (sockfd == -1)
+        {
+            fprintf(stderr, "sokt_active_open failed\n");
+            goto loop_clean;
+        }
+
         // Send and recv
         memcpy(&buf, &msg, sizeof(struct sokt_message));
-        if (sokt_send(sockfds[server], (char *)&buf, sizeof(struct sokt_message)) != 0)
+        if (sokt_send(sockfd, (char *)&buf, sizeof(struct sokt_message)) != 0)
         {
             fprintf(stderr, "sokt_send failed\n");
-            continue;
+            goto loop_clean;
         }
 
 #ifdef LOG
@@ -146,10 +134,10 @@ int main(int argc, char *argv[])
         skot_message_show(&buf);
 #endif
 
-        if (sokt_recv(sockfds[server], (char *)&buf, sizeof(struct sokt_message)) != 0)
+        if (sokt_recv(sockfd, (char *)&buf, sizeof(struct sokt_message)) != 0)
         {
             fprintf(stderr, "sokt_recv failed\n");
-            continue;
+            goto loop_clean;
         }
 
 #ifdef LOG
@@ -187,23 +175,15 @@ int main(int argc, char *argv[])
         {
             fprintf(stderr, "wrong test\n");
         }
+
+    loop_clean:
+        sokt_active_close(sockfd);
     }
 
     printf("\n");
 
     // Release resources
     rv = EXIT_SUCCESS;
-
-out4:
-    for (int i = 0; i < servers_num; i++)
-    {
-        if (sockfds[i] != -1)
-        {
-            sokt_active_close(sockfds[i]);
-        }
-    }
-
-    free(sockfds);
 
 out3:
     ht_destroy(ht);

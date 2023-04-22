@@ -1,10 +1,25 @@
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "parameters.h"
+#include "pool.h"
 #include "ht.h"
 #include "rdma.h"
 #include "sokt.h"
+
+struct handle_client_info
+{
+    int unused; // For padding pupose; without this connfd cannot be passed to the thread pool correctly
+    int connfd;
+    char is_primary;
+    pthread_rwlock_t *rwlock;
+    struct ht *ht;
+    struct rdma_context *rdma_ctx;
+    int others_num;
+};
+
+void *handle_client(void *info);
 
 int main(int argc, char *argv[])
 {
@@ -53,6 +68,25 @@ int main(int argc, char *argv[])
     }
     printf("\n");
 
+    // For multithreading
+    pool_t pool = pool_init(5);
+    if (pool == NULL)
+    {
+        printf("pool_init failed\n");
+        goto out2;
+        return -1;
+    }
+
+    pthread_rwlock_t rwlock[HT_KEY_MAX - HT_KEY_MIN + 1];
+    for (long i = 0; i < HT_KEY_MAX - HT_KEY_MIN + 1; i++)
+    {
+        if (pthread_rwlock_init(&rwlock[i], NULL) != 0)
+        {
+            perror("pthread_rwlock_init");
+            goto out3;
+        }
+    }
+
     // Initiate hash table
     void *ht_addr;
     size_t ht_size;
@@ -61,7 +95,7 @@ int main(int argc, char *argv[])
     if (!ht)
     {
         fprintf(stderr, "ht_create failed\n");
-        goto out2;
+        goto out4;
     }
 
     ht_preload(ht);
@@ -73,7 +107,7 @@ int main(int argc, char *argv[])
     if (sockfd == -1)
     {
         fprintf(stderr, "sokt_passive_open failed\n");
-        goto out3;
+        goto out5;
     }
 
     // Setup RDMA connections with other servers
@@ -81,18 +115,81 @@ int main(int argc, char *argv[])
     if (!rdma_ctx)
     {
         fprintf(stderr, "rdma_open_connection failed\n");
-        goto out4;
+        goto out6;
     }
 
     // Run the key-value store
     printf("\nrunning experiments\n");
 
-    int connfd = sokt_passive_accept_open(sockfd);
-    if (connfd == -1)
+    while (1)
     {
-        fprintf(stderr, "sokt_passive_accept_open failed\n");
-        goto out5;
+        struct handle_client_info *info = calloc(1, sizeof(struct handle_client_info));
+        if (!info)
+        {
+            perror("calloc for info");
+            continue;
+        }
+
+        info->connfd = sokt_passive_accept_open(sockfd);
+        if (info->connfd == -1)
+        {
+            fprintf(stderr, "sokt_passive_accept_open failed\n");
+            free(info);
+            continue;
+        }
+
+        info->is_primary = is_primary;
+        info->rwlock = rwlock;
+        info->ht = ht;
+        info->rdma_ctx = rdma_ctx;
+        info->others_num = others_num;
+
+        if (pool_add(pool, handle_client, info) == -1)
+        {
+            fprintf(stderr, "pool_add failed\n");
+        }
     }
+
+    // Release resources
+    rv = EXIT_SUCCESS;
+
+    rdma_close_connection(rdma_ctx, others_num);
+
+out6:
+    sokt_passive_close(sockfd);
+
+out5:
+    ht_destroy(ht);
+
+out4:
+    for (long i = 0; i < HT_KEY_MAX - HT_KEY_MIN + 1; i++)
+    {
+        pthread_rwlock_destroy(&rwlock[i]);
+    }
+
+out3:
+    pool_free(pool);
+
+out2:
+    if (name_others)
+    {
+        free(name_others);
+    }
+
+out1:
+    return rv;
+}
+
+void *handle_client(void *info)
+{
+    int connfd = ((struct handle_client_info *)info)->connfd;
+    char is_primary = ((struct handle_client_info *)info)->is_primary;
+    pthread_rwlock_t *rwlock = ((struct handle_client_info *)info)->rwlock;
+    struct ht *ht = ((struct handle_client_info *)info)->ht;
+    struct rdma_context *rdma_ctx = ((struct handle_client_info *)info)->rdma_ctx;
+    int others_num = ((struct handle_client_info *)info)->others_num;
+
+    free(info);
 
     struct sokt_message msg;
     int ht_status;
@@ -101,22 +198,23 @@ int main(int argc, char *argv[])
     size_t ht_element_size[2];
     enum sokt_message_code code;
 
-    while (1)
+    if (sokt_recv(connfd, (char *)&msg, sizeof(struct sokt_message)) != 0)
     {
-        if (sokt_recv(connfd, (char *)&msg, sizeof(struct sokt_message)) != 0)
-        {
-            fprintf(stderr, "sokt_recv failed\n");
-            continue;
-        }
+        fprintf(stderr, "sokt_recv failed\n");
+        goto handle_client_out_1;
+    }
 
 #ifdef LOG
-        printf("from client:\t");
-        skot_message_show(&msg);
+    printf("from client:\t");
+    skot_message_show(&msg);
 #endif
 
-        code = msg.code;
-        if (code == SOKT_CODE_PUT && is_primary)
+    code = msg.code;
+    if (code == SOKT_CODE_PUT && is_primary)
+    {
+        if (pthread_rwlock_wrlock(&rwlock[msg.key]) == 0)
         {
+
             ht_status = ht_put(ht, msg.key, msg.value, &is_update, ht_element_offset, ht_element_size);
             switch (ht_status)
             {
@@ -131,8 +229,17 @@ int main(int argc, char *argv[])
                 break;
             }
         }
-        else if (code == SOKT_CODE_GET)
+        else
         {
+            perror("pthread_rwlock_wrlock");
+            msg.code = SOKT_CODE_ERROR;
+        }
+    }
+    else if (code == SOKT_CODE_GET)
+    {
+        if (pthread_rwlock_rdlock(&rwlock[msg.key]) == 0)
+        {
+
             ht_status = ht_get(ht, msg.key, &msg.value, is_primary);
             switch (ht_status)
             {
@@ -149,72 +256,64 @@ int main(int argc, char *argv[])
         }
         else
         {
+            perror("pthread_rwlock_rdlock");
             msg.code = SOKT_CODE_ERROR;
         }
+    }
+    else
+    {
+        msg.code = SOKT_CODE_ERROR;
+    }
 
-        if (sokt_send(connfd, (char *)&msg, sizeof(struct sokt_message)) != 0)
-        {
-            fprintf(stderr, "sokt_send failed\n");
-            continue;
-        }
+    if (sokt_send(connfd, (char *)&msg, sizeof(struct sokt_message)) != 0)
+    {
+        fprintf(stderr, "sokt_send failed\n");
+        goto handle_client_out_2;
+    }
 
 #ifdef LOG
-        printf("to   client:\t");
-        skot_message_show(&msg);
+    printf("to   client:\t");
+    skot_message_show(&msg);
 #endif
 
-        if (code == SOKT_CODE_PUT && msg.code == SOKT_CODE_SUCCESS && is_primary)
+    if (code == SOKT_CODE_PUT && msg.code == SOKT_CODE_SUCCESS && is_primary)
+    {
+        if (rdma_wrtie_all(rdma_ctx, ht_element_offset[0], ht_element_size[0], others_num) == -1)
         {
-            if (rdma_wrtie_all(rdma_ctx, ht_element_offset[0], ht_element_size[0], others_num) == -1)
+            fprintf(stderr, "rdma_wrtie_all failed\n");
+            goto handle_client_out_2;
+        }
+
+        if (rdma_wait_completion_all(rdma_ctx, others_num) == -1)
+        {
+            fprintf(stderr, "rdma_wait_completion_all failed\n");
+            goto handle_client_out_2;
+        }
+
+        if (is_update == 0)
+        {
+            if (rdma_wrtie_all(rdma_ctx, ht_element_offset[1], ht_element_size[1], others_num) == -1)
             {
                 fprintf(stderr, "rdma_wrtie_all failed\n");
-                goto out6;
+                goto handle_client_out_2;
             }
 
             if (rdma_wait_completion_all(rdma_ctx, others_num) == -1)
             {
                 fprintf(stderr, "rdma_wait_completion_all failed\n");
-                goto out6;
-            }
-
-            if (is_update == 0)
-            {
-                if (rdma_wrtie_all(rdma_ctx, ht_element_offset[1], ht_element_size[1], others_num) == -1)
-                {
-                    fprintf(stderr, "rdma_wrtie_all failed\n");
-                    goto out6;
-                }
-
-                if (rdma_wait_completion_all(rdma_ctx, others_num) == -1)
-                {
-                    fprintf(stderr, "rdma_wait_completion_all failed\n");
-                    goto out6;
-                }
+                goto handle_client_out_2;
             }
         }
     }
 
-    // Release resources
-    rv = EXIT_SUCCESS;
-
-out6:
-    sokt_passive_accept_close(connfd);
-
-out5:
-    rdma_close_connection(rdma_ctx, others_num);
-
-out4:
-    sokt_passive_close(sockfd);
-
-out3:
-    ht_destroy(ht);
-
-out2:
-    if (name_others)
+handle_client_out_2:
+    if (pthread_rwlock_unlock(&rwlock[msg.key]) != 0)
     {
-        free(name_others);
+        perror("pthread_rwlock_unlock"); // Should rarely happen
     }
 
-out1:
-    return rv;
+handle_client_out_1:
+    sokt_passive_accept_close(connfd);
+
+    return NULL;
 }
