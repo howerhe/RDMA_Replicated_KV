@@ -69,12 +69,11 @@ int main(int argc, char *argv[])
     printf("\n");
 
     // For multithreading
-    pool_t pool = pool_init(5);
+    pool_t pool = pool_init(SERVER_THREAD);
     if (pool == NULL)
     {
         printf("pool_init failed\n");
         goto out2;
-        return -1;
     }
 
     pthread_rwlock_t rwlock[HT_KEY_MAX - HT_KEY_MIN + 1];
@@ -201,7 +200,7 @@ void *handle_client(void *info)
     if (sokt_recv(connfd, (char *)&msg, sizeof(struct sokt_message)) != 0)
     {
         fprintf(stderr, "sokt_recv failed\n");
-        goto handle_client_out_1;
+        goto out1;
     }
 
 #ifdef LOG
@@ -268,7 +267,7 @@ void *handle_client(void *info)
     if (sokt_send(connfd, (char *)&msg, sizeof(struct sokt_message)) != 0)
     {
         fprintf(stderr, "sokt_send failed\n");
-        goto handle_client_out_2;
+        goto out2;
     }
 
 #ifdef LOG
@@ -281,13 +280,13 @@ void *handle_client(void *info)
         if (rdma_wrtie_all(rdma_ctx, ht_element_offset[0], ht_element_size[0], others_num) == -1)
         {
             fprintf(stderr, "rdma_wrtie_all failed\n");
-            goto handle_client_out_2;
+            goto out2;
         }
 
         if (rdma_wait_completion_all(rdma_ctx, others_num) == -1)
         {
             fprintf(stderr, "rdma_wait_completion_all failed\n");
-            goto handle_client_out_2;
+            goto out2;
         }
 
         if (is_update == 0)
@@ -295,24 +294,24 @@ void *handle_client(void *info)
             if (rdma_wrtie_all(rdma_ctx, ht_element_offset[1], ht_element_size[1], others_num) == -1)
             {
                 fprintf(stderr, "rdma_wrtie_all failed\n");
-                goto handle_client_out_2;
+                goto out2;
             }
 
             if (rdma_wait_completion_all(rdma_ctx, others_num) == -1)
             {
                 fprintf(stderr, "rdma_wait_completion_all failed\n");
-                goto handle_client_out_2;
+                goto out2;
             }
         }
     }
 
-handle_client_out_2:
+out2:
     if (pthread_rwlock_unlock(&rwlock[msg.key]) != 0)
     {
         perror("pthread_rwlock_unlock"); // Should rarely happen
     }
 
-handle_client_out_1:
+out1:
     sokt_passive_accept_close(connfd);
 
     return NULL;

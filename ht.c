@@ -2,10 +2,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "parameters.h"
 #include "ht.h"
 
 struct element
 {
+    char unused[CHUNK]; // To test how the size affect the RDMA throughput and latency
     ht_key_t key;
     ht_value_t value;
     struct element *next;
@@ -132,6 +134,7 @@ void ht_show(struct ht *ht)
     }
 }
 
+// Not implemented
 void ht_preload(struct ht *ht)
 {
     assert(ht);
@@ -216,11 +219,12 @@ enum ht_code ht_put(const struct ht *ht, ht_key_t key, ht_value_t value, char *i
     return HT_CODE_SUCCESS;
 }
 
+// Not implemented
 enum ht_code ht_del(const struct ht *ht, ht_key_t key, ht_value_t value, long *offset, size_t *size)
 {
     assert(ht);
     assert(HT_KEY_MIN <= key && key <= HT_KEY_MAX);
-    assert(0); // unfinished
+    assert(0);
 
     return HT_CODE_ERROR;
 }

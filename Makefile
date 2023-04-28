@@ -7,7 +7,7 @@ all: server client
 pool.o: pool.c
 	${CC} ${CFLAGS} -fPIC -c $<;
 
-ht.o: ht.c
+ht.o: ht.c parameters.h
 	${CC} ${CFLAGS} -fPIC -c $<;
 
 rdma.o: rdma.c
@@ -22,7 +22,7 @@ server: server.c parameters.h pool.o ht.o rdma.o sokt.o
 
 client: client.c parameters.h ht.o sokt.o
 	${CC} ${CFLAGS} -c $<;
-	${CC} client.o ht.o sokt.o -o client
+	${CC} client.o ht.o sokt.o -lpthread -o client
 
 clean:
 	rm server client

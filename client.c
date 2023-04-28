@@ -1,7 +1,9 @@
 #include <assert.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -9,6 +11,26 @@
 #include "parameters.h"
 #include "ht.h"
 #include "sokt.h"
+
+// Experiment record
+struct log
+{
+    int requests;
+    double latency;
+};
+
+// Length of the log
+#define LOG_LENGTH (TEST_NUM / STATISTICS_CYCLE - 1)
+
+struct client_routine_info
+{
+    struct sokt_name_info *name_client;
+    struct sokt_name_info *name_servers;
+    int servers_num;
+    int index;
+};
+
+void *client_routine(void *info);
 
 int main(int argc, char *argv[])
 {
@@ -50,20 +72,71 @@ int main(int argc, char *argv[])
     }
     printf("\n");
 
+    pthread_t tids[CLIENT_THREAD];
+    struct client_routine_info info[CLIENT_THREAD];
+
+    // Statistics
+    struct timeval start, end;
+    gettimeofday(&start, NULL);
+
+    for (int i = 0; i < CLIENT_THREAD; i++)
+    {
+        info[i].name_client = &name_client;
+        info[i].name_servers = name_servers;
+        info[i].servers_num = servers_num;
+        info[i].index = i;
+
+        if (pthread_create(&tids[i], NULL, client_routine, &info[i]) != 0)
+        {
+            perror("pthread_create");
+            goto out2;
+        }
+    }
+
+    for (int i = 0; i < CLIENT_THREAD; i++)
+    {
+        if (pthread_join(tids[i], NULL) != 0)
+        {
+            perror("pthread_join");
+            goto out2;
+        }
+    }
+
+    gettimeofday(&end, NULL);
+    double us = (end.tv_sec * 1000000 + end.tv_usec) - (start.tv_sec * 1000000 + start.tv_usec);
+    printf("throughput is %.3f ops/ms\n", TEST_NUM * CLIENT_THREAD / (us / 1000));
+
+    // Release resources
+    rv = EXIT_SUCCESS;
+
+out2:
+    free(name_servers);
+
+out1:
+    return rv;
+}
+
+void *client_routine(void *info)
+{
+    struct sokt_name_info *name_client = ((struct client_routine_info *)info)->name_client;
+    struct sokt_name_info *name_servers = ((struct client_routine_info *)info)->name_servers;
+    int servers_num = ((struct client_routine_info *)info)->servers_num;
+    int index = ((struct client_routine_info *)info)->index;
+
     // Initiate hash table
     struct ht *ht = ht_create(BUCKET_NUM, ELEMENT_NUM, NULL, NULL);
     if (!ht)
     {
         fprintf(stderr, "ht_create failed\n");
-        goto out2;
+        goto out1;
     }
 
     ht_preload(ht);
 
-    printf("hashtable initiated\n");
+    printf("hashtable initiated for thread %d\n", index);
 
     // Run the key-value store
-    printf("\nrunning experiments\n");
+    printf("running experiments for thread %d\n", index);
 
     srand48(getpid() * time(NULL));
 
@@ -71,8 +144,27 @@ int main(int argc, char *argv[])
     enum ht_code code;
     int server;
 
+    // Statistics
+    struct log log[LOG_LENGTH];
+    int n_req = 0;
+    struct timeval start, end;
+
+    gettimeofday(&start, NULL);
     for (int i = 0; i < TEST_NUM; i++)
     {
+        // Statistics
+        if (n_req % STATISTICS_CYCLE == 0 && n_req != 0)
+        {
+            gettimeofday(&end, NULL);
+            double us = (end.tv_sec * 1000000 + end.tv_usec) - (start.tv_sec * 1000000 + start.tv_usec);
+
+            int index = n_req / STATISTICS_CYCLE - 1;
+            log[index].requests = n_req;
+            log[index].latency = us / 1000;
+
+            gettimeofday(&start, NULL);
+        }
+
         /*
         // Test that shows backup can work
         switch (i % 3)
@@ -162,14 +254,15 @@ int main(int argc, char *argv[])
         }
         else if (msg.code == SOKT_CODE_GET)
         {
-            code = ht_get(ht, msg.key, &msg.value, 1);
-            assert((buf.code == SOKT_CODE_SUCCESS && code == HT_CODE_SUCCESS) || (buf.code == SOKT_CODE_NOT_FOUND && code == HT_CODE_NOT_FOUND));
-            assert(buf.key == msg.key);
+            // These are not always true when there are multiple clients
+            // code = ht_get(ht, msg.key, &msg.value, 1);
+            // assert((buf.code == SOKT_CODE_SUCCESS && code == HT_CODE_SUCCESS) || (buf.code == SOKT_CODE_NOT_FOUND && code == HT_CODE_NOT_FOUND));
+            // assert(buf.key == msg.key);
 
-            if (buf.code == SOKT_CODE_SUCCESS)
-            {
-                assert(buf.value == msg.value);
-            }
+            // if (buf.code == SOKT_CODE_SUCCESS)
+            // {
+            //     assert(buf.value == msg.value);
+            // }
         }
         else
         {
@@ -178,19 +271,28 @@ int main(int argc, char *argv[])
 
     loop_clean:
         sokt_active_close(sockfd);
+
+        n_req++;
     }
 
     printf("\n");
 
-    // Release resources
-    rv = EXIT_SUCCESS;
+    // Write the statistics into file
+    char file_name[20];
+    sprintf(file_name, "%s_%s_%d.csv", "client", name_client->port, index);
+    FILE *fp = fopen(file_name, "w");
+    assert(fp);
 
-out3:
+    fprintf(fp, "requests, latency (ms)\n");
+    for (int i = 0; i < LOG_LENGTH; i++)
+    {
+        fprintf(fp, "%d, %.3f\n", log[i].requests, log[i].latency);
+    }
+
+    fclose(fp);
+
     ht_destroy(ht);
 
-out2:
-    free(name_servers);
-
 out1:
-    return rv;
+    return NULL;
 }
